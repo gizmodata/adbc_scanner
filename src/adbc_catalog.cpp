@@ -844,6 +844,7 @@ struct SchemaFieldRow {
     string field_name;
     string field_type;
     bool nullable;
+    string arrow_format;
 };
 
 struct AdbcSchemaBindData : public TableFunctionData {
@@ -883,6 +884,7 @@ static void ExtractSchemaFields(ClientContext &context, ArrowSchema *schema, vec
 
         // In Arrow C Data Interface, nullable is indicated by ARROW_FLAG_NULLABLE bit (flags & 2)
         row.nullable = (child->flags & 2) != 0;
+        row.arrow_format = child->format ? child->format : "";
         field_rows.push_back(row);
     }
 }
@@ -921,8 +923,8 @@ static unique_ptr<FunctionData> AdbcSchemaBind(ClientContext &context, TableFunc
     bind_data->connection = GetValidatedConnection(bind_data->connection_id, "adbc_schema");
 
     // Return schema for fields
-    names = {"field_name", "field_type", "nullable"};
-    return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN};
+    names = {"field_name", "field_type", "nullable", "arrow_format"};
+    return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::VARCHAR};
 
     return std::move(bind_data);
 }
@@ -971,12 +973,14 @@ static void AdbcSchemaFunction(ClientContext &context, TableFunctionInput &data,
     auto &name_vector = output.data[0];
     auto &type_vector = output.data[1];
     auto &nullable_vector = output.data[2];
+    auto &arrow_format_vector = output.data[3];
 
     while (global_state.current_row < global_state.field_rows.size() && count < STANDARD_VECTOR_SIZE) {
         auto &row = global_state.field_rows[global_state.current_row];
         name_vector.SetValue(count, Value(row.field_name));
         type_vector.SetValue(count, Value(row.field_type));
         nullable_vector.SetValue(count, Value(row.nullable));
+        arrow_format_vector.SetValue(count, Value(row.arrow_format));
         count++;
         global_state.current_row++;
     }

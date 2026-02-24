@@ -11,6 +11,7 @@
 #include "duckdb/storage/statistics/numeric_stats.hpp"
 #include "duckdb/storage/statistics/string_stats.hpp"
 #include "duckdb/common/insertion_order_preserving_map.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include <nanoarrow/nanoarrow.h>
@@ -147,47 +148,42 @@ static idx_t ExtractBatchSize(TableFunctionBindInput &input, const string &func_
     return 0;
 }
 
-// Helper to get schema from a prepared statement (tries ExecuteSchema first, falls back to execute)
-// Returns true if schema was obtained, populates schema_root
+// Helper to get schema from a prepared statement by executing and reading the stream schema.
+// Note: We intentionally do NOT use AdbcStatementExecuteSchema here. Some drivers
+// (notably the Snowflake ADBC driver) return schema types from ExecuteSchema that
+// don't match the actual data format returned by ExecuteQuery (e.g., reporting
+// int64/double format strings while sending Decimal128 data). This causes data
+// corruption because ArrowToDuckDB reads the wrong number of bytes per value.
+// By always getting the schema from an actual execution stream, we guarantee the
+// types match the data that will be returned during scanning.
 static void GetSchemaFromStatement(AdbcStatementWrapper &statement, const string &query,
                                     ArrowSchemaWrapper &schema_root, const string &func_name) {
-    // Try to get schema without executing using ExecuteSchema (ADBC 1.1.0+)
-    bool got_schema = false;
+    ArrowArrayStream stream;
+    memset(&stream, 0, sizeof(stream));
+
     try {
-        got_schema = statement.ExecuteSchema(&schema_root.arrow_schema);
+        statement.ExecuteQuery(&stream, nullptr);
     } catch (Exception &e) {
-        got_schema = false;
+        throw IOException(FormatError(func_name + ": Failed to execute query: " + string(e.what()), query));
     }
 
-    if (!got_schema) {
-        // Fallback: driver doesn't support ExecuteSchema, need to execute to get schema
-        ArrowArrayStream stream;
-        memset(&stream, 0, sizeof(stream));
-
-        try {
-            statement.ExecuteQuery(&stream, nullptr);
-        } catch (Exception &e) {
-            throw IOException(FormatError(func_name + ": Failed to execute query: " + string(e.what()), query));
+    int ret = stream.get_schema(&stream, &schema_root.arrow_schema);
+    if (ret != 0) {
+        const char *error_msg = stream.get_last_error(&stream);
+        string msg = func_name + ": Failed to get schema from stream";
+        if (error_msg) {
+            msg += ": ";
+            msg += error_msg;
         }
-
-        int ret = stream.get_schema(&stream, &schema_root.arrow_schema);
-        if (ret != 0) {
-            const char *error_msg = stream.get_last_error(&stream);
-            string msg = func_name + ": Failed to get schema from stream";
-            if (error_msg) {
-                msg += ": ";
-                msg += error_msg;
-            }
-            if (stream.release) {
-                stream.release(&stream);
-            }
-            throw IOException(FormatError(msg, query));
-        }
-
-        // Release the stream
         if (stream.release) {
             stream.release(&stream);
         }
+        throw IOException(FormatError(msg, query));
+    }
+
+    // Release the stream
+    if (stream.release) {
+        stream.release(&stream);
     }
 }
 
@@ -764,19 +760,26 @@ static unique_ptr<FunctionData> AdbcScanTableBind(ClientContext &context, TableF
     // Now validate and get connection wrapper
     bind_data->connection = GetValidatedConnection(bind_data->connection_id, "adbc_scan_table");
 
-    // Create and prepare statement
-    auto statement = make_shared_ptr<AdbcStatementWrapper>(bind_data->connection);
-    statement->Init();
-    statement->SetSqlQuery(bind_data->query);
+    // Get schema by executing the query and reading the stream schema.
+    // We intentionally do NOT use GetTableSchema or ExecuteSchema here because some
+    // drivers (notably the Snowflake ADBC driver) return different types from metadata
+    // APIs vs the actual data stream. For example, GetTableSchema may report int64/double
+    // format strings while the stream contains Decimal128 data. Using the stream schema
+    // ensures the bind-time return types match the actual data format, which is critical
+    // because ArrowToDuckDB dispatches based on the output vector type (from bind).
+    {
+        auto statement = make_shared_ptr<AdbcStatementWrapper>(bind_data->connection);
+        statement->Init();
+        statement->SetSqlQuery(bind_data->query);
 
-    try {
-        statement->Prepare();
-    } catch (Exception &e) {
-        throw InvalidInputException("adbc_scan_table: Failed to prepare statement for table '" + bind_data->table_name + "': " + string(e.what()));
+        try {
+            statement->Prepare();
+        } catch (Exception &e) {
+            throw InvalidInputException("adbc_scan_table: Failed to prepare statement for table '" + bind_data->table_name + "': " + string(e.what()));
+        }
+
+        GetSchemaFromStatement(*statement, bind_data->query, bind_data->schema_root, "adbc_scan_table");
     }
-
-    // Get schema from statement (tries ExecuteSchema, falls back to execute)
-    GetSchemaFromStatement(*statement, bind_data->query, bind_data->schema_root, "adbc_scan_table");
 
     // Populate return types and names from Arrow schema
     PopulateReturnTypesFromSchema(context, *bind_data, return_types, names);
@@ -905,12 +908,15 @@ static unique_ptr<GlobalTableFunctionState> AdbcScanTableInitGlobal(ClientContex
     }
     global_state->stream_initialized = true;
 
-    // If we projected, we need to get the schema from the stream and populate projected_arrow_table
-    if (needs_projection) {
+    // Always get the stream schema and use it for ArrowToDuckDB conversion.
+    // This ensures the ArrowTableType used for reading Arrow buffers always matches the
+    // actual data format in the stream. This is critical because some drivers (e.g.,
+    // Snowflake) may report different types at schema-discovery time vs execution time.
+    {
         int ret = global_state->stream.get_schema(&global_state->stream, &global_state->projected_schema.arrow_schema);
         if (ret != 0) {
             const char *error_msg = global_state->stream.get_last_error(&global_state->stream);
-            string msg = "adbc_scan_table: Failed to get schema from projected query";
+            string msg = "adbc_scan_table: Failed to get schema from query stream";
             if (error_msg) {
                 msg += ": ";
                 msg += error_msg;
@@ -966,21 +972,52 @@ static void AdbcScanTableFunction(ClientContext &context, TableFunctionInput &da
 
     output.SetCardinality(output_size);
 
-    // Convert Arrow data to DuckDB
-    // If we have a projected schema, use that; otherwise use the bind_data schema
     if (output_size > 0) {
-        if (global_state.has_projected_schema) {
-            // With projection, arrow columns match output columns 1:1
-            ArrowTableFunction::ArrowToDuckDB(local_state,
-                                              global_state.projected_arrow_table.GetColumns(),
-                                              output,
-                                              true);  // arrow_scan_is_projected = true since columns match 1:1
+        auto &stream_columns = global_state.projected_arrow_table.GetColumns();
+
+        // Check if stream schema types differ from output types.
+        // This can happen when the ATTACH path creates table columns using GetTableSchema
+        // (which may return int64/double) while the actual data stream uses different types
+        // (e.g., Decimal128). ArrowToDuckDB dispatches on the output vector type, so a
+        // mismatch causes it to read the wrong number of bytes per value.
+        bool types_match = true;
+        for (idx_t i = 0; i < output.ColumnCount() && i < stream_columns.size(); i++) {
+            if (stream_columns.at(i)->GetDuckType() != output.data[i].GetType()) {
+                types_match = false;
+                break;
+            }
+        }
+
+        if (types_match) {
+            // Fast path: types match, convert directly into output
+            ArrowTableFunction::ArrowToDuckDB(local_state, stream_columns, output, true);
         } else {
-            // No projection, use original bind_data schema
-            ArrowTableFunction::ArrowToDuckDB(local_state,
-                                              bind_data.arrow_table.GetColumns(),
-                                              output,
-                                              false);
+            // Slow path: type mismatch detected. Create a temporary DataChunk with the
+            // stream schema types so ArrowToDuckDB reads data with the correct byte widths,
+            // then cast each column to the output type.
+            vector<LogicalType> stream_types;
+            for (idx_t i = 0; i < output.ColumnCount(); i++) {
+                if (i < stream_columns.size()) {
+                    stream_types.push_back(stream_columns.at(i)->GetDuckType());
+                } else {
+                    stream_types.push_back(output.data[i].GetType());
+                }
+            }
+
+            DataChunk temp_chunk;
+            temp_chunk.Initialize(context, stream_types, output_size);
+            temp_chunk.SetCardinality(output_size);
+
+            ArrowTableFunction::ArrowToDuckDB(local_state, stream_columns, temp_chunk, true);
+
+            // Cast each column from stream type to output type
+            for (idx_t i = 0; i < output.ColumnCount(); i++) {
+                if (stream_types[i] == output.data[i].GetType()) {
+                    output.data[i].Reference(temp_chunk.data[i]);
+                } else {
+                    VectorOperations::Cast(context, temp_chunk.data[i], output.data[i], output_size);
+                }
+            }
         }
     }
 
