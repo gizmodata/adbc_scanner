@@ -8,7 +8,7 @@ using namespace duckdb;
 
 AdbcTransaction::AdbcTransaction(AdbcCatalog &adbc_catalog, TransactionManager &manager, ClientContext &context)
     : Transaction(manager, context), adbc_catalog(adbc_catalog),
-      transaction_state(AdbcTransactionState::TRANSACTION_NOT_YET_STARTED), access_mode(adbc_catalog.access_mode) {
+      transaction_state(AdbcTransactionState::TRANSACTION_NOT_YET_STARTED) {
 }
 
 AdbcTransaction::~AdbcTransaction() = default;

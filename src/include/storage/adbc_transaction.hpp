@@ -39,7 +39,6 @@ public:
 private:
 	AdbcCatalog &adbc_catalog;
 	AdbcTransactionState transaction_state;
-	AccessMode access_mode;
 };
 
 } // namespace adbc_scanner

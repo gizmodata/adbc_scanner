@@ -126,6 +126,7 @@ vector<pair<string, string>> MergeSecretOptions(ClientContext &context,
 
 // Create secret function
 static unique_ptr<BaseSecret> CreateAdbcSecretFunction(ClientContext &context, CreateSecretInput &input) {
+	(void)context;
 	auto scope = input.scope;
 
 	// Scope is required and should be a URI pattern
@@ -185,7 +186,7 @@ void RegisterAdbcSecrets(ExtensionLoader &loader) {
 	loader.RegisterSecretType(secret_type);
 
 	// Register the create secret function with known parameters
-	CreateSecretFunction adbc_secret_function = {"adbc", "config", CreateAdbcSecretFunction};
+	CreateSecretFunction adbc_secret_function = {"adbc", "config", CreateAdbcSecretFunction, {}};
 
 	// Common ADBC connection parameters
 	adbc_secret_function.named_parameters["driver"] = LogicalType::VARCHAR;

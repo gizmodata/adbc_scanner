@@ -46,6 +46,8 @@ struct AdbcExecuteBindData : public FunctionData {
 // Bind function for adbc_execute
 static unique_ptr<FunctionData> AdbcExecuteBind(ClientContext &context, ScalarFunction &bound_function,
                                                  vector<unique_ptr<Expression>> &arguments) {
+    (void)context;
+    (void)bound_function;
     auto bind_data = make_uniq<AdbcExecuteBindData>();
     return std::move(bind_data);
 }
@@ -88,6 +90,7 @@ static int64_t ExecuteStatement(int64_t connection_id, const string &query) {
 
 // Execute function - runs DDL/DML and returns rows affected
 static void AdbcExecuteFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    (void)state;
     auto &conn_vector = args.data[0];
     auto &query_vector = args.data[1];
     auto count = args.size();
@@ -112,7 +115,6 @@ static void AdbcExecuteFunction(DataChunk &args, ExpressionState &state, Vector 
     // Handle flat/dictionary vectors
     result.SetVectorType(VectorType::FLAT_VECTOR);
     auto result_data = FlatVector::GetData<int64_t>(result);
-    auto &validity = FlatVector::Validity(result);
 
     for (idx_t row_idx = 0; row_idx < count; row_idx++) {
         auto conn_value = conn_vector.GetValue(row_idx);

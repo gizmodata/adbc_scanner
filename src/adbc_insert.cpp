@@ -134,6 +134,7 @@ struct AdbcInsertGlobalState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData> AdbcInsertBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
+    (void)context;
     auto bind_data = make_uniq<AdbcInsertBindData>();
 
     // Check for NULL connection handle
@@ -255,6 +256,7 @@ static OperatorResultType AdbcInsertInOut(ExecutionContext &context, TableFuncti
 
 static OperatorFinalizeResultType AdbcInsertFinalize(ExecutionContext &context, TableFunctionInput &data_p,
                                                       DataChunk &output) {
+    (void)context;
     auto &global_state = data_p.global_state->Cast<AdbcInsertGlobalState>();
     lock_guard<mutex> l(global_state.lock);
 

@@ -97,6 +97,7 @@ static void AdbcConnectFunction(DataChunk &args, ExpressionState &state, Vector 
 // adbc_disconnect(connection_id BIGINT) -> BOOLEAN
 // Disconnects and removes a connection from the registry
 static void AdbcDisconnectFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	(void)state;
 	auto &connection_vector = args.data[0];
 
 	UnaryExecutor::Execute<int64_t, bool>(connection_vector, result, args.size(), [&](int64_t connection_id) {
@@ -113,6 +114,7 @@ static void AdbcDisconnectFunction(DataChunk &args, ExpressionState &state, Vect
 // adbc_commit(connection_id BIGINT) -> BOOLEAN
 // Commits the current transaction
 static void AdbcCommitFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	(void)state;
 	auto &connection_vector = args.data[0];
 
 	UnaryExecutor::Execute<int64_t, bool>(connection_vector, result, args.size(), [&](int64_t connection_id) {
@@ -125,6 +127,7 @@ static void AdbcCommitFunction(DataChunk &args, ExpressionState &state, Vector &
 // adbc_rollback(connection_id BIGINT) -> BOOLEAN
 // Rolls back the current transaction
 static void AdbcRollbackFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	(void)state;
 	auto &connection_vector = args.data[0];
 
 	UnaryExecutor::Execute<int64_t, bool>(connection_vector, result, args.size(), [&](int64_t connection_id) {
@@ -137,6 +140,7 @@ static void AdbcRollbackFunction(DataChunk &args, ExpressionState &state, Vector
 // adbc_set_autocommit(connection_id BIGINT, enabled BOOLEAN) -> BOOLEAN
 // Sets the autocommit mode for the connection
 static void AdbcSetAutocommitFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	(void)state;
 	auto &connection_vector = args.data[0];
 	auto &enabled_vector = args.data[1];
 

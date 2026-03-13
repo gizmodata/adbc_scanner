@@ -319,7 +319,12 @@ static void TryGetStatisticsFromADBC(AdbcConnectionWrapper &connection, const st
         }
 
         ArrowArrayView view;
-        ArrowArrayViewInitFromSchema(&view, &schema, nullptr);
+        ret = ArrowArrayViewInitFromSchema(&view, &schema, nullptr);
+        if (ret != 0) {
+            if (schema.release) schema.release(&schema);
+            if (batch.release) batch.release(&batch);
+            break;
+        }
         ret = ArrowArrayViewSetArray(&view, &batch, nullptr);
         if (ret != 0) {
             ArrowArrayViewReset(&view);
@@ -581,7 +586,7 @@ static unique_ptr<GlobalTableFunctionState> AdbcScanInitGlobal(ClientContext &co
         global_state->projection_ids = input.projection_ids;
         for (const auto &col_idx : input.column_ids) {
             if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
-                global_state->scanned_types.emplace_back(LogicalType(LogicalType::BIGINT)));
+                global_state->scanned_types.emplace_back(LogicalType(LogicalType::BIGINT));
             } else {
                 global_state->scanned_types.push_back(bind_data.return_types[col_idx]);
             }
